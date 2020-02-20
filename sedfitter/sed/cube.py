@@ -3,8 +3,8 @@ import numpy as np
 
 from astropy import units as u
 from astropy.io import fits
-from astropy.extern import six
 from astropy.table import Table
+import six
 
 from ..utils.validator import validate_scalar, validate_array
 
