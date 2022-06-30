@@ -316,10 +316,10 @@ def plot(input_fits, output_dir=None, select_format=("N", 1), plot_max=None,
 
             if flux.ndim > 1:
                 for j in range(flux.shape[1]):
-                    lines.append(np.column_stack([s.wav, flux[:, j]]))
+                    lines.append(np.column_stack([s.wav.value if hasattr(s.wav, 'value') else s.wav, flux[:, j]]))
                     colors.append(color[color_type][j])
             else:
-                lines.append(np.column_stack([s.wav, flux]))
+                lines.append(np.column_stack([s.wav.value if hasattr(s.wav, 'value') else s.wav, flux]))
                 colors.append(color[color_type])
 
             if show_convolved:
