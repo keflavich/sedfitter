@@ -1,5 +1,6 @@
 import abc
 import numpy as np
+import six
 
 from astropy import units as u
 from astropy.io import fits
