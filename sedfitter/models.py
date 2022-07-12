@@ -296,7 +296,6 @@ class Models(object):
             else:
                 model_fluxes = np.zeros(shape) * u.mJy
                 extended = np.zeros(shape, dtype=bool)
-        print(f"Data shape={shape}.  use_memmap={use_memmap}")
 
         # Define empty wavelength array
         m.wavelengths = np.zeros(len(filters)) * u.micron
