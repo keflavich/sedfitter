@@ -13,8 +13,7 @@ from .helpers import parse_unit_safe, table_to_hdu, assert_allclose_quantity
 __all__ = ['BaseCube', 'SEDCube', 'PolarizationCube']
 
 
-@six.add_metaclass(abc.ABCMeta)
-class BaseCube(object):
+class BaseCube(object, metaclass=abc.ABCMeta):
     """
     A cube to represent a cube of models.
 
@@ -383,7 +382,7 @@ class BaseCube(object):
             hdulist.append(hdu5)
 
         # Write out HDUList
-        hdulist.writeto(filename, clobber=overwrite)
+        hdulist.writeto(filename, overwrite=overwrite)
 
 
 class SEDCube(BaseCube):
