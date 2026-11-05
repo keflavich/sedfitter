@@ -29,6 +29,7 @@ User documentation
    installation.rst
    fitting.rst
    convolution.rst
+   emulator.rst
    oo.rst
 
 Appendices
