@@ -9,6 +9,10 @@ inclination to the model SED (log10 flux density in mJy at 1 kpc) in the 20
 apertures (100 to 10^6 AU) and at the 165 wavelengths >= 0.1 micron of the
 published grid.  See ``docs/emulator.rst`` for its accuracy and limits.
 
+``GeometryEmulator`` evaluates the 5-member ensembles of all 12 emulated
+geometries (``GEOMETRIES``) in the grids' physical parameters; their files
+are under ``BASE_URL + 'geometries/<geometry>/'``.
+
 The weights (one ensemble member, float16) and the metadata are public:
 
     https://data.rc.ufl.edu/pub/adamginsburg/sedfitter/meta.json
@@ -183,6 +187,147 @@ class YSOEmulator:
         largest absolute difference (dex)."""
         tp = self.meta['test_points']
         d = np.abs(self.log_flux(np.array(tp['theta'])).reshape(len(tp['theta']), -1) - np.array(tp['logf']))
+        if d.max() > tol:
+            raise ValueError(f'emulator check failed: max difference {d.max():.3g} dex')
+        return float(d.max())
+
+
+GEOMETRIES = ('spubsmi', 'spubhmi', 'spu-smi', 'spu-hmi', 's-pbsmi', 's-pbhmi', 's-p-smi', 's-p-hmi',
+              's-ubsmi', 's-ubhmi', 's-u-smi', 's-u-hmi')
+
+
+def _forward(W, nblocks, x):
+    h = x @ W['inp.weight'].T + W['inp.bias']
+    for i in range(nblocks):
+        p = f'blocks.{i}.'
+        a = _layer_norm(h, W[p + '0.weight'], W[p + '0.bias'])
+        a = _silu(a @ W[p + '1.weight'].T + W[p + '1.bias'])
+        h = h + a @ W[p + '3.weight'].T + W[p + '3.bias']
+    return _layer_norm(h, W['out.0.weight'], W['out.0.bias']) @ W['out.1.weight'].T + W['out.1.bias']
+
+
+class GeometryEmulator:
+    """The 5-member emulator ensemble of one R24 geometry (any of
+    GEOMETRIES), in the grid's own physical parameters.
+
+    Rows ``p`` have one column per entry of ``self.names`` (the sampled grid
+    parameters, linear physical units as in the grid's parameters.fits) and,
+    for geometries with an envelope, a last column with the inclination in
+    degrees.  Linked parameters (e.g. envelope.rc = disk.rmax) are filled in.
+    ``self.lo`` / ``self.hi`` are the R24 prior bounds of the sampled
+    parameters (``self.is_log``: sampled uniformly in log10).
+
+    ``directory`` holds meta.json and emu<k>.f16 of one geometry, as
+    published under ``BASE_URL + 'geometries/<geometry>/'``."""
+
+    def __init__(self, directory, members=None):
+        with open(os.path.join(directory, 'meta.json')) as f:
+            self.meta = M = json.load(f)
+        self.geometry = M['geometry']
+        self.members = list(range(M['n_members'])) if members is None else list(members)
+        self.nets = []
+        for k in self.members:
+            m = M['members'][k]
+            blob = np.fromfile(os.path.join(directory, m['file']), dtype='<f2').astype(np.float32)
+            if blob.size != M['n_values']:
+                raise ValueError(f"{m['file']} has {blob.size} values, meta.json expects {M['n_values']}")
+            W = {l['name']: blob[l['offset']:l['offset'] + int(np.prod(l['shape']))].reshape(l['shape'])
+                 for l in M['layers']}
+            self.nets.append((W, np.array(m['out_mu'], np.float32), np.array(m['out_sd'], np.float32)))
+        self.nblocks = M['nblocks']
+        self.wav = np.array(M['wav'])                 # micron, descending
+        self.apertures = np.array(M['aps_au'])        # AU, ascending
+        self.ext = np.array(M['ext'])                 # A_lambda / A_V of the grid's dust family, on self.wav
+        self.parnames = M['parnames']                 # network order, linked parameters included
+        self.par_log = np.array(M['log'])
+        rg = M['ranges']
+        self.names = [r['name'] for r in rg if 'linked' not in r]
+        self.links = {r['name']: r['linked'] for r in rg if 'linked' in r}
+        self.is_log = np.array([r['scale'] == 'log10' for r in rg if 'linked' not in r])
+        self.lo = np.array([r['lower'] for r in rg if 'linked' not in r])
+        self.hi = np.array([r['upper'] for r in rg if 'linked' not in r])
+        self.inclination = M['inclination']
+        self.x_lo, self.x_hi = np.array(M['x_lo']), np.array(M['x_hi'])
+
+    @classmethod
+    def download(cls, directory, geometry='spubsmi', members=None, base_url=BASE_URL):
+        """Fetch meta.json and the weights of the chosen members (default all
+        5, about 10 MB each) of one geometry into directory and load them."""
+        if geometry not in GEOMETRIES:
+            raise ValueError(f'no emulator for {geometry}; available: {GEOMETRIES}')
+        os.makedirs(directory, exist_ok=True)
+        url = f'{base_url}geometries/{geometry}/'
+        path = os.path.join(directory, 'meta.json')
+        if not os.path.exists(path):
+            urllib.request.urlretrieve(url + 'meta.json', path)
+        with open(path) as f:
+            M = json.load(f)
+        for k in (range(M['n_members']) if members is None else members):
+            name = M['members'][k]['file']
+            if not os.path.exists(os.path.join(directory, name)):
+                urllib.request.urlretrieve(url + name, os.path.join(directory, name))
+        return cls(directory, members)
+
+    def prior_draws(self, n, seed=None):
+        """n rows drawn from the R24 priors (inclination uniform in 0-90 deg)."""
+        rng = np.random.default_rng(seed)
+        u = rng.random((n, len(self.names)))
+        p = self.lo + u * (self.hi - self.lo)
+        lg = self.is_log
+        p[:, lg] = self.lo[lg] * (self.hi[lg] / self.lo[lg]) ** u[:, lg]
+        return np.column_stack([p, 90. * rng.random(n)]) if self.inclination else p
+
+    def rows(self, **pars):
+        """One row from named values: every name in self.names, plus
+        'inclination' for geometries with an envelope."""
+        return np.array([pars[n] for n in self.names] + ([pars['inclination']] if self.inclination else []))
+
+    def luminosity(self, p):
+        """log10 L / Lsun (L = R*^2 (T*/5772 K)^4)."""
+        p = np.atleast_2d(p)
+        return (2 * np.log10(p[:, self.names.index('star.radius')])
+                + 4 * (np.log10(p[:, self.names.index('star.temperature')]) - LOG_TSUN))
+
+    def _inputs(self, p):
+        p = np.atleast_2d(np.asarray(p, float))
+        col = lambda n: p[:, self.names.index(self.links.get(n, n))]
+        cols = [np.log10(col(n)) if lg else col(n) for n, lg in zip(self.parnames, self.par_log)]
+        cols.append(self.luminosity(p))
+        if self.inclination:
+            cols.append(np.cos(np.radians(p[:, -1])))
+        x = np.column_stack(cols)
+        return (2 * (x - self.x_lo) / (self.x_hi - self.x_lo) - 1).astype(np.float32)
+
+    def log_flux(self, p, spread=False, chunk=4096):
+        """Ensemble-mean log10 flux density (mJy at 1 kpc, no foreground
+        extinction): shape (n, 20 apertures, 165 wavelengths) on
+        self.apertures and self.wav (descending).  spread=True also returns
+        the standard deviation over the members (dex)."""
+        x = self._inputs(p)
+        shape = (len(x), len(self.apertures), len(self.wav))
+        mean, sd = np.empty(shape, np.float32), np.empty(shape, np.float32)
+        for i in range(0, len(x), chunk):
+            y = np.stack([_forward(W, self.nblocks, x[i:i + chunk]) * s + m for W, m, s in self.nets])
+            y = y.reshape((len(self.nets), -1) + shape[1:])
+            mean[i:i + chunk], sd[i:i + chunk] = y.mean(0), y.std(0)
+        return (mean, sd) if spread else mean
+
+    def check(self, tol=0.01):
+        """Compare with the reference outputs in meta.json (ensemble mean
+        when all members are loaded, member 0 otherwise); returns the largest
+        absolute difference (dex)."""
+        tp = self.meta['test_points']
+        raw = np.array(tp['raw'])
+        p = raw[:, [self.parnames.index(n) for n in self.names]]
+        if self.inclination:
+            p = np.column_stack([p, raw[:, -1]])
+        if self.members == list(range(self.meta['n_members'])):
+            ref = tp['logf_mean']
+        elif self.members == [0]:
+            ref = tp['logf_member0']
+        else:
+            raise ValueError('check() needs all members or member 0 only')
+        d = np.abs(self.log_flux(p).reshape(len(p), -1) - np.array(ref))
         if d.max() > tol:
             raise ValueError(f'emulator check failed: max difference {d.max():.3g} dex')
         return float(d.max())

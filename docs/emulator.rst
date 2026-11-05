@@ -36,8 +36,8 @@ recomputed by Richardson et al. (2024; "R24"): a star, a passive flared disk,
 a power-law (Ulrich) envelope with a bipolar cavity, and an ambient medium.
 It returns :math:`\log_{10}` of the flux density in mJy at 1 kpc, without
 foreground extinction, at the 165 grid wavelengths from 0.1 to 4838 µm and in
-the 20 grid apertures from 100 to :math:`10^6` AU. The other 15 geometries of
-the grid would each need their own emulator; none are public yet.
+the 20 grid apertures from 100 to :math:`10^6` AU. Eleven more geometries have
+their own ensembles (see `All geometries and the ensemble`_).
 
 The network takes 12 inputs ("fit-space" coordinates), with uniform priors
 over these ranges:
@@ -217,8 +217,46 @@ mid-infrared the rms exceeds the 68% half-width because a few per cent of the
 models have errors of several tenths of a dex. Reasonable choices of
 ``model_err_dex`` (Route 2) or :math:`\sigma_{\rm emu}` (Route 1) are
 0.05 dex for fits that include 1–24 µm bands and 0.02 dex for far-infrared
-and (sub)millimetre fits. An ensemble of five such networks, averaged, reduces
-the 68% half-widths by a factor of 1.3–1.6; only one network is public.
+and (sub)millimetre fits. Averaging the five networks of the ensemble (see
+below) reduces the 68% half-widths by a factor of 1.3–1.6.
+
+All geometries and the ensemble
+===============================
+
+Each emulated geometry has five networks trained with different random seeds.
+Their mean is more accurate than any one of them, and their standard deviation
+flags inputs where they disagree. ``GeometryEmulator`` loads them, for any of
+the 12 geometries in ``yso_emulator.GEOMETRIES`` (all R24 geometries with a
+disk or an envelope: ``spubsmi``, ``spubhmi``, ``spu-smi``, ``spu-hmi``,
+``s-pbsmi``, ``s-pbhmi``, ``s-p-smi``, ``s-p-hmi``, ``s-ubsmi``, ``s-ubhmi``,
+``s-u-smi``, ``s-u-hmi``)::
+
+    from yso_emulator import GeometryEmulator
+
+    emu = GeometryEmulator.download('emu_s-pbsmi', 's-pbsmi')   # meta.json + 5 x 9.7 MB
+    emu.check()                                  # against reference outputs, dex
+    emu.names                                    # the grid's sampled parameters
+    p = emu.prior_draws(1000, seed=0)            # (1000, len(names) + 1): physical values, inclination last
+    logf, spread = emu.log_flux(p, spread=True)  # ensemble mean and member standard deviation, dex
+
+Rows hold the grid's parameters in the physical units of its
+``parameters.fits`` (for example ``envelope.rho_0`` in g cm\ :sup:`-3`), in
+``emu.names`` order, followed by the inclination in degrees for geometries
+with an envelope; ``emu.rows(**values)`` builds one row from named values.
+Linked parameters (``envelope.rc`` equals ``disk.rmax``) are filled in, and
+``emu.lo``, ``emu.hi`` and ``emu.is_log`` give the prior ranges.
+``members=[0]`` loads one network, for five times faster evaluation.
+The files are under
+https://data.rc.ufl.edu/pub/adamginsburg/sedfitter/geometries/ (one
+directory per geometry; ``index.json`` lists them with their accuracy).
+
+The five networks of a geometry take 49 MB as float16; the ensemble evaluated
+900–2,200 SEDs per second in our tests (numpy, one HiPerGator node). Median held-out errors (per SED, within
+6 dex of the peak) of the ensemble mean are 0.008–0.018 dex, depending on the
+geometry. Float16 rounding changes the outputs by at most 0.005 dex.
+``GeometryEmulator`` covers the SEDs only; the core mass network and the
+12-coordinate fit space of the examples above are specific to ``spubsmi``
+and ``YSOEmulator``.
 
 Choosing between the routes
 ===========================
